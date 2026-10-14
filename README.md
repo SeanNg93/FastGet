@@ -46,7 +46,7 @@ dotnet test                                            # 13 test: engine, HLS, s
 ./build-release.ps1 -Version 1.1.0                     # exe tự đóng gói + zip portable + bộ cài (cần Inno Setup 6)
 ```
 
-Push một tag `v*` (ví dụ `git tag v1.2.0 && git push origin v1.2.0`) thì GitHub Actions
+Push một tag `v*` (ví dụ `git tag v1.2.1 && git push origin v1.2.0`) thì GitHub Actions
 (`.github/workflows/release.yml`) sẽ tự build, chạy test và tạo Release kèm bộ cài.
 
 ## Cài tích hợp trình duyệt

@@ -2,10 +2,10 @@
 .SYNOPSIS
   Builds the release artifacts: a self-contained FastGet.exe, a portable zip and the Inno Setup installer.
 .EXAMPLE
-  ./build-release.ps1 -Version 1.2.0
+  ./build-release.ps1 -Version 1.2.1
 #>
 param(
-    [string]$Version = "1.2.0",
+    [string]$Version = "1.2.1",
     [string]$Iscc = ""
 )
 $ErrorActionPreference = "Stop"
