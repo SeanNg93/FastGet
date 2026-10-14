@@ -14,6 +14,18 @@ static class Program
         if (BrowserIntegration.IsNativeHostLaunch(args))
             return NativeHost.Run();
 
+        // Used by the installer: register or remove the native messaging host without showing any UI.
+        if (args.Contains("--register-browsers"))
+        {
+            BrowserIntegration.Install();
+            return 0;
+        }
+        if (args.Contains("--unregister-browsers"))
+        {
+            BrowserIntegration.Uninstall();
+            return 0;
+        }
+
         bool background = args.Contains("--background");
         var url = args.FirstOrDefault(a => a.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                                            || a.StartsWith("https://", StringComparison.OrdinalIgnoreCase));

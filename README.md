@@ -5,6 +5,17 @@ Viết lại từ đầu (clean-room) bằng C# / .NET 10 WinForms, không chứ
 Hành vi cần mô phỏng được xác định bằng cách phân tích bản IDM đã cài trên máy bằng REA, xem
 [docs/REA-findings.md](docs/REA-findings.md).
 
+## Tải về
+
+Vào [Releases](https://github.com/SeanNg93/FastGet/releases/latest) và chọn một trong hai:
+
+- `FastGet-<version>-setup.exe`: bộ cài cho Windows 10/11 x64. Cài theo từng user, không cần quyền admin.
+  Có tuỳ chọn đăng ký tích hợp trình duyệt và tự chạy cùng Windows. Gỡ được trong *Settings → Apps*.
+- `FastGet-<version>-win-x64-portable.zip`: bản portable, giải nén ra là chạy.
+
+Cả hai đã đóng gói sẵn .NET nên không cần cài runtime. Bộ cài chưa được ký số, vì vậy Windows SmartScreen
+có thể cảnh báo "Windows protected your PC"; bấm **More info → Run anyway** để tiếp tục.
+
 ## Tính năng
 
 | Tính năng | Ghi chú |
@@ -32,8 +43,11 @@ Yêu cầu .NET SDK 10.
 dotnet build
 dotnet run --project src\FastGet.App
 dotnet test                                            # 13 test: engine, HLS, scheduler, queue
-dotnet publish src\FastGet.App -c Release -o publish   # bản chạy độc lập trong .\publish
+./build-release.ps1 -Version 1.1.0                     # exe tự đóng gói + zip portable + bộ cài (cần Inno Setup 6)
 ```
+
+Push một tag `v*` (ví dụ `git tag v1.2.0 && git push origin v1.2.0`) thì GitHub Actions
+(`.github/workflows/release.yml`) sẽ tự build, chạy test và tạo Release kèm bộ cài.
 
 ## Cài tích hợp trình duyệt
 
