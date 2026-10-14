@@ -75,6 +75,7 @@ sealed class MainForm : Form
         _m.ItemCompleted += i => BeginInvokeSafe(() => OnCompleted(i));
         _m.QueueStateChanged += () => BeginInvokeSafe(() => { UpdateCommands(); UpdateStatusBar(); });
         _m.QueueCompleted += () => BeginInvokeSafe(OnQueueCompleted);
+        _m.SettingsChanged += () => BeginInvokeSafe(() => { FillTree(); RebuildList(); });
         _scheduler = new QueueScheduler(_m);
         _scheduler.Started += () => BeginInvokeSafe(() =>
         {
@@ -223,8 +224,19 @@ sealed class MainForm : Form
         _tree.Nodes.AddRange([all, unfinished, finished, queues]);
         all.Expand();
         queues.Expand();
-        _tree.SelectedNode = all;
+        // Keep the user on the same category/filter when the tree is rebuilt.
+        _tree.SelectedNode = FindNode(_tree.Nodes, _filter) ?? all;
         _tree.EndUpdate();
+    }
+
+    static TreeNode? FindNode(TreeNodeCollection nodes, string tag)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if ((string?)n.Tag == tag) return n;
+            if (FindNode(n.Nodes, tag) is { } found) return found;
+        }
+        return null;
     }
 
     void BuildList()

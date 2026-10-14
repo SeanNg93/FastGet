@@ -41,6 +41,8 @@ public sealed class DownloadManager : IDisposable
     public event Action<DownloadItem>? ItemChanged;
     public event Action<DownloadItem>? ItemCompleted;
     public event Action? QueueStateChanged;
+    /// <summary>Settings were replaced (e.g. categories added or edited from a download dialog).</summary>
+    public event Action? SettingsChanged;
     /// <summary>The queue ran out of work on its own (not stopped by the user) — the moment to exit or shut down.</summary>
     public event Action? QueueCompleted;
 
@@ -52,6 +54,17 @@ public sealed class DownloadManager : IDisposable
     public DownloadItem? Find(Guid id)
     {
         lock (_lock) return _items.FirstOrDefault(i => i.Id == id);
+    }
+
+    /// <summary>Adds or replaces a category (matched by name) and saves settings.</summary>
+    public void SaveCategory(Category category, string? previousName = null)
+    {
+        var s = Settings.Clone();
+        var index = s.Categories.FindIndex(c => c.Name == (previousName ?? category.Name));
+        if (index >= 0) s.Categories[index] = category.Clone();
+        else s.Categories.Add(category.Clone());
+        if (category.Name == Category.GeneralName) s.DownloadRoot = category.Folder;
+        UpdateSettings(s);
     }
 
     public Task<List<StreamOption>> InspectStreamAsync(string url, string? referer, string? cookies, string? userAgent, CancellationToken ct) =>
@@ -322,6 +335,7 @@ public sealed class DownloadManager : IDisposable
         Settings.Schedule = settings.Schedule;
         Limiter.BytesPerSecond = Settings.EffectiveSpeedLimit;
         JsonFile.Save(_settingsPath, Settings);
+        SettingsChanged?.Invoke();
         PumpQueue();
     }
 

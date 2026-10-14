@@ -63,23 +63,21 @@ sealed class DownloadInfoForm : DialogBase
     readonly NewDownload _request;
     readonly CancellationTokenSource _cts = new();
     readonly TextBox _url = new() { Location = new Point(100, 16), Width = 470, ReadOnly = true };
-    readonly ComboBox _category = new() { Location = new Point(100, 50), Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
-    readonly TextBox _saveAs = new() { Location = new Point(100, 84), Width = 430 };
-    readonly Button _browse = new() { Text = "...", Location = new Point(536, 83), Size = new Size(34, 25) };
-    readonly TextBox _description = new() { Location = new Point(100, 118), Width = 470 };
-    readonly Label _size = new() { Location = new Point(320, 53), Size = new Size(250, 20), Text = "Checking file size..." };
-    bool _userEditedPath;
+    readonly SaveTargetPanel _target;
+    readonly TextBox _description = new() { Location = new Point(100, 150), Width = 470 };
+    readonly Label _size = new() { Location = new Point(362, 53), Size = new Size(208, 20), Text = "Checking file size...", AutoEllipsis = true };
 
-    public DownloadInfoForm(DownloadManager manager, NewDownload request) : base("Download File Info", 586, 200)
+    public DownloadInfoForm(DownloadManager manager, NewDownload request) : base("Download File Info", 586, 232)
     {
         _manager = manager;
         _request = request;
-        Controls.AddRange([Lbl("URL", 14, 16), _url, Lbl("Category", 14, 50), _category, _size,
-            Lbl("Save As", 14, 84), _saveAs, _browse, Lbl("Description", 14, 118), _description]);
+        _target = new SaveTargetPanel(manager) { Location = new Point(14, 50) };
+        Controls.AddRange([Lbl("URL", 14, 16), _url, _size, _target, Lbl("Description", 14, 150), _description]);
+        _size.BringToFront();
 
-        var start = Btn("&Start Download", 214, 156, 120);
-        var later = Btn("Download &Later", 340, 156, 120);
-        var cancel = Btn("&Cancel", 466, 156, 104);
+        var start = Btn("&Start Download", 214, 190, 120);
+        var later = Btn("Download &Later", 340, 190, 120);
+        var cancel = Btn("&Cancel", 466, 190, 104);
         start.Click += (_, _) => Accept(AddMode.StartNow);
         later.Click += (_, _) => Accept(AddMode.Later);
         cancel.DialogResult = DialogResult.Cancel;
@@ -89,32 +87,15 @@ sealed class DownloadInfoForm : DialogBase
 
         _url.Text = request.Url;
         _description.Text = request.Description;
-        foreach (var c in manager.Settings.Categories) _category.Items.Add(c.Name);
-        SetFileName(request.FileName ?? Http.FileNameFromUrl(request.Url));
+        _target.SetFile(request.FileName ?? Http.FileNameFromUrl(request.Url));
         if (request.Size > 0) _size.Text = Fmt.Size(request.Size);
 
-        _category.SelectedIndexChanged += (_, _) => UpdatePathForCategory();
-        _saveAs.TextChanged += (_, _) => _userEditedPath = _saveAs.Focused;
-        _browse.Click += (_, _) => Browse();
         FormClosed += (_, _) => _cts.Cancel();
         Shown += async (_, _) => await ProbeAsync();
     }
 
     public AddMode Mode { get; private set; }
     public NewDownload Result => _request;
-
-    void SetFileName(string fileName)
-    {
-        var category = _manager.Settings.ResolveCategory(fileName);
-        _category.SelectedItem = category.Name;
-        _saveAs.Text = Path.Combine(category.Folder, fileName);
-    }
-
-    void UpdatePathForCategory()
-    {
-        var c = _manager.Settings.Categories.FirstOrDefault(x => x.Name == (string?)_category.SelectedItem);
-        if (c != null) _saveAs.Text = Path.Combine(c.Folder, Path.GetFileName(_saveAs.Text));
-    }
 
     async Task ProbeAsync()
     {
@@ -126,7 +107,7 @@ sealed class DownloadInfoForm : DialogBase
             _request.Resumable = probe.Resumable;
             _size.Text = (probe.Size >= 0 ? Fmt.Size(probe.Size) : "Unknown size") + (probe.Resumable ? "" : "  (no resume)");
             // A browser-supplied name wins; otherwise the server's Content-Disposition name is better than the URL.
-            if (!_userEditedPath && string.IsNullOrEmpty(_request.FileName)) SetFileName(probe.FileName);
+            if (!_target.UserEditedPath && string.IsNullOrEmpty(_request.FileName)) _target.SetFile(probe.FileName);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -135,27 +116,12 @@ sealed class DownloadInfoForm : DialogBase
         }
     }
 
-    void Browse()
-    {
-        using var dlg = new SaveFileDialog { FileName = Path.GetFileName(_saveAs.Text), InitialDirectory = Path.GetDirectoryName(_saveAs.Text) };
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            _saveAs.Text = dlg.FileName;
-            _userEditedPath = true;
-        }
-    }
-
     void Accept(AddMode mode)
     {
-        var path = _saveAs.Text.Trim();
-        if (Path.GetFileName(path).Length == 0 || !Path.IsPathRooted(path))
-        {
-            MessageBox.Show(this, "Please choose a full file path.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-        _request.FileName = Path.GetFileName(path);
-        _request.Folder = Path.GetDirectoryName(path);
-        _request.Category = (string?)_category.SelectedItem;
+        if (!_target.Commit(this)) return;
+        _request.FileName = Path.GetFileName(_target.FullPath);
+        _request.Folder = Path.GetDirectoryName(_target.FullPath);
+        _request.Category = _target.CategoryName;
         _request.Description = _description.Text;
         Mode = mode;
         DialogResult = DialogResult.OK;

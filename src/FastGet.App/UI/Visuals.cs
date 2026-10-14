@@ -20,6 +20,7 @@ static class Dpi
             if (Math.Abs(k - 1f) < 0.01f) return;
             form.Scale(new SizeF(k, k));
             ScaleColumns(form, k);
+            ResetTextBoxes(form);
             if (form.StartPosition == FormStartPosition.CenterParent && form.Owner != null) form.Location = Center(form, form.Owner.Bounds);
             else form.Location = Center(form, Screen.FromControl(form).WorkingArea);
         };
@@ -35,6 +36,31 @@ static class Dpi
             ScaleColumns(c, k);
         }
     }
+
+    /// <summary>
+    /// A single-line edit control keeps the scroll offset and margins it had at its unscaled width, which clips the first
+    /// characters after Scale(). Recompute margins from the font and scroll back to the start.
+    /// </summary>
+    static void ResetTextBoxes(Control parent)
+    {
+        foreach (Control c in parent.Controls)
+        {
+            if (c is TextBox { Multiline: false, IsHandleCreated: true } tb)
+            {
+                SendMessage(tb.Handle, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, EC_USEFONTINFO);
+                var text = tb.Text;
+                tb.Text = string.Empty;
+                tb.Text = text;
+                tb.Select(0, 0);
+            }
+            ResetTextBoxes(c);
+        }
+    }
+
+    const int EM_SETMARGINS = 0xD3, EC_LEFTMARGIN = 1, EC_RIGHTMARGIN = 2, EC_USEFONTINFO = 0xFFFF;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
 
     static Point Center(Form f, Rectangle area) =>
         new(area.Left + (area.Width - f.Width) / 2, Math.Max(area.Top, area.Top + (area.Height - f.Height) / 2));

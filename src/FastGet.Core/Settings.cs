@@ -10,6 +10,10 @@ public sealed class Category
     /// <summary>Space-separated extensions without dots.</summary>
     public string Extensions { get; set; } = "";
     public string Folder { get; set; } = "";
+    /// <summary>When the user saves a download of this category elsewhere, make that folder the new default.</summary>
+    public bool RememberLastPath { get; set; }
+
+    public Category Clone() => (Category)MemberwiseClone();
 
     public bool Matches(string fileName)
     {

@@ -13,33 +13,33 @@ sealed class VideoForm : DialogBase
     readonly ListView _options = new()
     {
         Location = new Point(14, 62), Size = new Size(612, 170), View = View.Details, FullRowSelect = true, MultiSelect = false,
-        HideSelection = false,
+        HideSelection = false, ShowItemToolTips = true,
     };
     readonly Label _status = new() { Location = new Point(14, 238), Size = new Size(612, 20), ForeColor = Color.DimGray };
-    readonly TextBox _name = new() { Location = new Point(100, 266), Width = 526 };
-    readonly TextBox _folder = new() { Location = new Point(100, 298), Width = 486 };
-    readonly Button _browse = new() { Text = "...", Location = new Point(592, 297), Size = new Size(34, 25) };
+    readonly SaveTargetPanel _target;
     readonly Button _start;
     readonly Button _later;
-    readonly string _baseName;
 
-    public VideoForm(DownloadManager manager, BrowserMessage message) : base("Download video", 640, 380)
+    public VideoForm(DownloadManager manager, BrowserMessage message) : base("Download video", 640, 410)
     {
         _manager = manager;
         _message = message;
         var title = string.IsNullOrWhiteSpace(message.Title) ? "video" : message.Title.Trim();
-        _baseName = Http.Sanitize(title.Length > 120 ? title[..120] : title);
+        var baseName = Http.Sanitize(title.Length > 120 ? title[..120] : title);
 
         Controls.Add(new Label { Text = title, Font = new Font("Segoe UI", 10f, FontStyle.Bold), Location = new Point(14, 12), Size = new Size(612, 22), AutoEllipsis = true });
         Controls.Add(new Label { Text = "Streams captured while the page played. Choose a quality:", Location = new Point(14, 38), AutoSize = true });
-        _options.Columns.Add("Quality / type", 330);
+        _options.Columns.Add("Quality / type", 300);
         _options.Columns.Add("Size", 90);
-        _options.Columns.Add("Address", 300);
-        Controls.AddRange([_options, _status, Lbl("File name", 14, 266), _name, Lbl("Save to", 14, 298), _folder, _browse]);
+        _options.Columns.Add("Address", 600);
+        _target = new SaveTargetPanel(manager) { Location = new Point(14, 266) };
+        // Videos go to the Video category by default, whatever the extension resolves to.
+        _target.SetFile(baseName + ".mp4", manager.Settings.Categories.Any(c => c.Name == "Video") ? "Video" : null);
+        Controls.AddRange([_options, _status, _target]);
 
-        _start = Btn("&Start Download", 262, 340, 120);
-        _later = Btn("Download &Later", 388, 340, 120);
-        var cancel = Btn("&Cancel", 514, 340, 112);
+        _start = Btn("&Start Download", 262, 370, 120);
+        _later = Btn("Download &Later", 388, 370, 120);
+        var cancel = Btn("&Cancel", 514, 370, 112);
         _start.Click += (_, _) => Accept(AddMode.StartNow);
         _later.Click += (_, _) => Accept(AddMode.Later);
         cancel.DialogResult = DialogResult.Cancel;
@@ -48,16 +48,8 @@ sealed class VideoForm : DialogBase
         CancelButton = cancel;
         _start.Enabled = _later.Enabled = false;
 
-        var video = manager.Settings.Categories.FirstOrDefault(c => c.Name == "Video");
-        _folder.Text = video?.Folder ?? manager.Settings.DownloadRoot;
-        _name.Text = _baseName + ".mp4";
-        _options.SelectedIndexChanged += (_, _) => UpdateName();
+        _options.SelectedIndexChanged += (_, _) => UpdateExtension();
         _options.DoubleClick += (_, _) => Accept(AddMode.StartNow);
-        _browse.Click += (_, _) =>
-        {
-            using var dlg = new FolderBrowserDialog { SelectedPath = _folder.Text };
-            if (dlg.ShowDialog(this) == DialogResult.OK) _folder.Text = dlg.SelectedPath;
-        };
         FormClosed += (_, _) => _cts.Cancel();
         Shown += async (_, _) => await InspectAllAsync();
     }
@@ -80,7 +72,7 @@ sealed class VideoForm : DialogBase
                 foreach (var o in options.Where(o => seen.Add(o.Url)))
                 {
                     var size = o.Size > 0 ? Fmt.Size(o.Size) : s.Size is > 0 ? Fmt.Size(s.Size.Value) : o.Kind == DownloadKind.Hls ? "stream" : "";
-                    _options.Items.Add(new ListViewItem([o.Label, size, o.Url]) { Tag = o });
+                    _options.Items.Add(new ListViewItem([o.Label, size, o.Url]) { Tag = o, ToolTipText = o.Url });
                 }
                 if (_options.SelectedItems.Count == 0 && _options.Items.Count > 0) _options.Items[0].Selected = true;
             }
@@ -97,25 +89,24 @@ sealed class VideoForm : DialogBase
         _start.Enabled = _later.Enabled = _options.Items.Count > 0;
     }
 
-    void UpdateName()
+    void UpdateExtension()
     {
         if (_options.SelectedItems.Count == 0) return;
         var o = (StreamOption)_options.SelectedItems[0].Tag!;
-        var ext = string.IsNullOrEmpty(o.Extension) ? ".mp4" : o.Extension;
-        _name.Text = Path.GetFileNameWithoutExtension(_name.Text) + ext;
+        _target.SetExtension(string.IsNullOrEmpty(o.Extension) ? ".mp4" : o.Extension);
     }
 
     void Accept(AddMode mode)
     {
-        if (_options.SelectedItems.Count == 0) return;
+        if (_options.SelectedItems.Count == 0 || !_target.Commit(this)) return;
         var o = (StreamOption)_options.SelectedItems[0].Tag!;
         Result = new NewDownload
         {
             Kind = o.Kind,
             Url = o.Url,
-            FileName = Http.Sanitize(_name.Text.Trim()),
-            Folder = _folder.Text.Trim(),
-            Category = "Video",
+            FileName = Path.GetFileName(_target.FullPath),
+            Folder = Path.GetDirectoryName(_target.FullPath),
+            Category = _target.CategoryName,
             Description = _message.Title ?? "",
             Referer = _message.Referer,
             Cookies = _message.Cookies,

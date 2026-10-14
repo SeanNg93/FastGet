@@ -15,12 +15,15 @@ sealed class OptionsForm : Form
     readonly NumericUpDown _retries = Number(0, 100, 84);
     readonly CheckBox _limitOn = new() { Text = "Limit total speed to", Location = new Point(16, 120), AutoSize = true };
     readonly NumericUpDown _limit = new() { Location = new Point(240, 118), Width = 90, Minimum = 1, Maximum = 1_000_000 };
-    readonly TextBox _root = new() { Location = new Point(16, 36), Width = 420 };
-    readonly DataGridView _categories = new()
-    {
-        Location = new Point(16, 100), Size = new Size(500, 220), AllowUserToAddRows = true, RowHeadersVisible = false,
-        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = SystemColors.Window,
-    };
+    // "Save to" tab: one category at a time, like the IDM options page.
+    readonly List<Category> _cats = new();
+    readonly ComboBox _catCombo = new() { Location = new Point(12, 46), Width = 300, DropDownStyle = ComboBoxStyle.DropDownList };
+    readonly Label _typesLabel = new() { Location = new Point(12, 86), Size = new Size(496, 20) };
+    readonly TextBox _catTypes = new() { Location = new Point(12, 108), Size = new Size(496, 46), Multiline = true, ScrollBars = ScrollBars.Vertical };
+    readonly Label _folderLabel = new() { Location = new Point(12, 166), Size = new Size(496, 20) };
+    readonly TextBox _catFolder = new() { Location = new Point(12, 188), Width = 412 };
+    readonly CheckBox _catRemember = new() { Location = new Point(12, 222), AutoSize = true };
+    Category? _current;
     readonly TextBox _extensions = new() { Location = new Point(16, 36), Size = new Size(500, 120), Multiline = true, ScrollBars = ScrollBars.Vertical };
     readonly TextBox _userAgent = new() { Location = new Point(16, 196), Width = 500 };
 
@@ -116,23 +119,91 @@ sealed class OptionsForm : Form
     TabPage SaveToTab()
     {
         var page = new TabPage("Save to");
-        _root.Text = _s.DownloadRoot;
-        var browse = new Button { Text = "Browse...", Location = new Point(442, 35), Size = new Size(74, 25) };
+        _cats.AddRange(_s.Categories.Select(c => c.Clone()));
+        var group = new GroupBox { Text = "Categories, file types, folders", Location = new Point(8, 8), Size = new Size(520, 262) };
+        var newBtn = new Button { Text = "New...", Location = new Point(320, 45), Size = new Size(90, 26) };
+        var editBtn = new Button { Text = "Rename...", Location = new Point(416, 45), Size = new Size(92, 26) };
+        var deleteBtn = new Button { Text = "Delete", Location = new Point(416, 77), Size = new Size(92, 26) };
+        var browse = new Button { Text = "Browse...", Location = new Point(430, 187), Size = new Size(78, 25) };
+        group.Controls.AddRange([new Label { Text = "Category", Location = new Point(12, 26), AutoSize = true }, _catCombo, newBtn, editBtn, deleteBtn,
+            _typesLabel, _catTypes, _folderLabel, _catFolder, browse, _catRemember]);
+        page.Controls.Add(group);
+        page.Controls.Add(new Label
+        {
+            Text = "Downloads are filed by extension. Changing the General folder also moves the other category folders that are inside it.",
+            Location = new Point(12, 278), Size = new Size(510, 40), ForeColor = Color.DimGray,
+        });
+
+        _catCombo.SelectedIndexChanged += (_, _) => ShowCategory(_cats.FirstOrDefault(c => c.Name == (string?)_catCombo.SelectedItem));
         browse.Click += (_, _) =>
         {
-            using var dlg = new FolderBrowserDialog { SelectedPath = _root.Text };
-            if (dlg.ShowDialog(this) == DialogResult.OK) _root.Text = dlg.SelectedPath;
+            using var dlg = new FolderBrowserDialog { SelectedPath = _catFolder.Text };
+            if (dlg.ShowDialog(this) == DialogResult.OK) _catFolder.Text = dlg.SelectedPath;
         };
-        _categories.Columns.Add("Name", "Category");
-        _categories.Columns.Add("Extensions", "File types (space separated)");
-        _categories.Columns.Add("Folder", "Folder");
-        _categories.Columns[0].FillWeight = 20;
-        _categories.Columns[1].FillWeight = 45;
-        _categories.Columns[2].FillWeight = 35;
-        foreach (var c in _s.Categories) _categories.Rows.Add(c.Name, c.Extensions, c.Folder);
-        page.Controls.AddRange([Lbl("Default download folder (General category)", 16, 14), _root, browse,
-            Lbl("Categories: new downloads are filed by extension", 16, 78), _categories]);
+        newBtn.Click += (_, _) =>
+        {
+            CommitCategory();
+            var root = _cats.First(c => c.Name == Category.GeneralName).Folder;
+            using var dlg = new CategoryForm(null, _cats, root);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            _cats.Add(dlg.Result);
+            _current = null;
+            FillCategoryCombo(dlg.Result.Name);
+        };
+        editBtn.Click += (_, _) =>
+        {
+            if (_current == null) return;
+            CommitCategory();
+            using var dlg = new CategoryForm(_current, _cats, _s.DownloadRoot);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            _cats[_cats.IndexOf(_current)] = dlg.Result;
+            _current = null;
+            FillCategoryCombo(dlg.Result.Name);
+        };
+        deleteBtn.Click += (_, _) =>
+        {
+            if (_current == null || _current.Name == Category.GeneralName) return;
+            if (MessageBox.Show(this, $"Delete the \"{_current.Name}\" category? Files already downloaded are not touched.", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            _cats.Remove(_current);
+            _current = null;
+            FillCategoryCombo(Category.GeneralName);
+        };
+        _catCombo.SelectedIndexChanged += (_, _) => deleteBtn.Enabled = (string?)_catCombo.SelectedItem != Category.GeneralName;
+        FillCategoryCombo(Category.GeneralName);
         return page;
+    }
+
+    void FillCategoryCombo(string select)
+    {
+        _catCombo.Items.Clear();
+        foreach (var c in _cats) _catCombo.Items.Add(c.Name);
+        _catCombo.SelectedItem = select;
+    }
+
+    void ShowCategory(Category? c)
+    {
+        CommitCategory();
+        _current = c;
+        if (c == null) return;
+        bool general = c.Name == Category.GeneralName;
+        _typesLabel.Text = $"Automatically put in \"{c.Name}\" category the following file types:";
+        _catTypes.ReadOnly = general;
+        _catTypes.Text = general ? "The file types that are not listed in any other category" : c.Extensions;
+        _folderLabel.Text = $"Default download directory for \"{c.Name}\" category";
+        _catFolder.Text = c.Folder;
+        _catRemember.Text = $"Change folder for \"{c.Name}\" category on last selected";
+        _catRemember.Checked = c.RememberLastPath;
+    }
+
+    /// <summary>Writes the visible fields back into the category being shown.</summary>
+    void CommitCategory()
+    {
+        if (_current == null) return;
+        if (_current.Name != Category.GeneralName)
+            _current.Extensions = string.Join(' ', _catTypes.Text.Split((char[])[' ', '\r', '\n', ',', ';', '.'], StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+        if (Path.IsPathRooted(_catFolder.Text.Trim())) _current.Folder = _catFolder.Text.Trim();
+        _current.RememberLastPath = _catRemember.Checked;
     }
 
     TabPage FileTypesTab()
@@ -156,16 +227,15 @@ sealed class OptionsForm : Form
         _s.MaxRetries = (int)_retries.Value;
         _s.SpeedLimitEnabled = _limitOn.Checked;
         _s.SpeedLimitKBps = (int)_limit.Value;
+        CommitCategory();
         var oldRoot = _s.DownloadRoot;
-        _s.DownloadRoot = _root.Text.Trim();
+        var general = _cats.First(c => c.Name == Category.GeneralName);
+        _s.DownloadRoot = general.Folder;
         _s.AutoExtensions = string.Join(' ', _extensions.Text.Split((char[])[' ', '\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries));
         _s.UserAgent = _userAgent.Text.Trim();
-        _s.Categories = _categories.Rows.Cast<DataGridViewRow>()
-            .Where(r => !r.IsNewRow)
-            .Select(r => (Name: (r.Cells[0].Value as string ?? "").Trim(), Ext: (r.Cells[1].Value as string ?? "").Trim(), Folder: (r.Cells[2].Value as string ?? "").Trim()))
-            .Where(r => r.Name.Length > 0)
-            .Select(r => new Category { Name = r.Name, Extensions = r.Ext, Folder = RebaseFolder(r.Folder, oldRoot, _s.DownloadRoot, r.Name) })
-            .ToList();
+        foreach (var c in _cats.Where(c => c != general))
+            c.Folder = RebaseFolder(c.Folder, oldRoot, _s.DownloadRoot, c.Name);
+        _s.Categories = _cats;
     }
 
     /// <summary>Category folders under the old root follow the root when it changes.</summary>
