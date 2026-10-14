@@ -18,6 +18,17 @@ public sealed class BrowserMessage
     [JsonPropertyName("userAgent")] public string? UserAgent { get; set; }
     [JsonPropertyName("size")] public long? Size { get; set; }
     [JsonPropertyName("links")] public List<PageLink>? Links { get; set; }
+    [JsonPropertyName("title")] public string? Title { get; set; }
+    [JsonPropertyName("streams")] public List<CapturedStream>? Streams { get; set; }
+}
+
+/// <summary>A media response the extension saw while the page played a video.</summary>
+public sealed class CapturedStream
+{
+    [JsonPropertyName("url")] public string Url { get; set; } = "";
+    /// <summary>"hls" or "file".</summary>
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "file";
+    [JsonPropertyName("size")] public long? Size { get; set; }
 }
 
 public sealed class PageLink
@@ -143,12 +154,14 @@ static class NativeHost
     }
 }
 
-/// <summary>Registers this exe as the native messaging host for the bundled extension in Chrome, Edge and Brave.</summary>
+/// <summary>Registers this exe as the native messaging host for the bundled extensions (Chromium browsers and Firefox).</summary>
 public static class BrowserIntegration
 {
     public const string HostName = "com.fastget.host";
-    /// <summary>Derived from the public key in extension/manifest.json, so the unpacked extension always has this ID.</summary>
+    /// <summary>Derived from the public key in extension/chrome/manifest.json, so the unpacked extension always has this ID.</summary>
     public const string ExtensionId = "nomjcihllkmhgcflkembbleomaknglla";
+    /// <summary>gecko id from extension/firefox/manifest.json.</summary>
+    public const string FirefoxExtensionId = "fastget@fastget.app";
 
     static readonly string[] RegistryRoots =
     [
@@ -157,9 +170,16 @@ public static class BrowserIntegration
         @"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
         @"Software\Chromium\NativeMessagingHosts",
     ];
+    const string FirefoxRegistryRoot = @"Software\Mozilla\NativeMessagingHosts";
 
     public static string ManifestPath => Path.Combine(Program.DataDir, HostName + ".json");
+    public static string FirefoxManifestPath => Path.Combine(Program.DataDir, HostName + ".firefox.json");
     public static string ExtensionFolder => Path.Combine(AppContext.BaseDirectory, "extension");
+
+    /// <summary>Chrome starts the host with the extension origin; Firefox with the manifest path and the add-on id.</summary>
+    public static bool IsNativeHostLaunch(string[] args) =>
+        args.Length > 0 && (args[0].StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase)
+                            || args.Contains(FirefoxExtensionId, StringComparer.OrdinalIgnoreCase));
 
     public static bool IsInstalled()
     {
@@ -184,12 +204,26 @@ public static class BrowserIntegration
             using var key = Registry.CurrentUser.CreateSubKey(root + "\\" + HostName);
             key.SetValue(null, ManifestPath);
         }
+
+        // Firefox uses the same format but lists add-on ids instead of origins.
+        var firefox = new
+        {
+            name = HostName,
+            description = "FastGet Download Manager",
+            path = Environment.ProcessPath,
+            type = "stdio",
+            allowed_extensions = new[] { FirefoxExtensionId },
+        };
+        File.WriteAllText(FirefoxManifestPath, JsonSerializer.Serialize(firefox, new JsonSerializerOptions { WriteIndented = true }));
+        using (var key = Registry.CurrentUser.CreateSubKey(FirefoxRegistryRoot + "\\" + HostName))
+            key.SetValue(null, FirefoxManifestPath);
     }
 
     public static void Uninstall()
     {
-        foreach (var root in RegistryRoots)
+        foreach (var root in RegistryRoots.Append(FirefoxRegistryRoot))
             Registry.CurrentUser.DeleteSubKeyTree(root + "\\" + HostName, throwOnMissingSubKey: false);
         File.Delete(ManifestPath);
+        File.Delete(FirefoxManifestPath);
     }
 }

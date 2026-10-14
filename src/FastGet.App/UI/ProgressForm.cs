@@ -85,7 +85,8 @@ sealed class ProgressForm : Form
     void RefreshView()
     {
         var pct = _item.Progress * 100;
-        Text = _item.TotalSize > 0 ? $"{pct:0}% {_item.FileName}" : _item.FileName;
+        bool hls = _item.Kind == DownloadKind.Hls;
+        Text = _item.HasKnownProgress ? $"{pct:0}% {_item.FileName}" : _item.FileName;
         _status.Text = _item.Status switch
         {
             DownloadStatus.Downloading => "Receiving data...",
@@ -96,18 +97,24 @@ sealed class ProgressForm : Form
             _ => "Paused",
         };
         _status.ForeColor = _item.Status == DownloadStatus.Error ? Color.Firebrick : SystemColors.ControlText;
-        _size.Text = _item.TotalSize >= 0 ? Fmt.Size(_item.TotalSize) : "Unknown";
-        _downloaded.Text = Fmt.Size(_item.Downloaded) + (_item.TotalSize > 0 ? $" ( {pct:0.000} % )" : "");
+        _size.Text = hls && _item.Status != DownloadStatus.Completed
+            ? _item.ExpectedSize > 0 ? $"~{Fmt.Size(_item.ExpectedSize)} (estimated)" : "Video stream"
+            : _item.TotalSize >= 0 ? Fmt.Size(_item.TotalSize) : "Unknown";
+        _downloaded.Text = Fmt.Size(_item.Downloaded) + (hls
+            ? $" ( {_item.StreamDone} / {_item.StreamTotal} segments )"
+            : _item.TotalSize > 0 ? $" ( {pct:0.000} % )" : "");
         _rate.Text = Fmt.Speed(_item.Speed);
         _left.Text = Fmt.Time(_item.TimeLeft);
-        _resume.Text = _item.TotalSize < 0 && !_item.Resumable && _item.Status == DownloadStatus.Connecting ? "" : _item.Resumable ? "Yes" : "No";
-        _bar.Style = _item.TotalSize > 0 || !_item.IsActive ? ProgressBarStyle.Continuous : ProgressBarStyle.Marquee;
+        _resume.Text = hls ? "Yes (by segment)" : _item.TotalSize < 0 && !_item.Resumable && _item.Status == DownloadStatus.Connecting ? "" : _item.Resumable ? "Yes" : "No";
+        _bar.Style = _item.HasKnownProgress || !_item.IsActive ? ProgressBarStyle.Continuous : ProgressBarStyle.Marquee;
         _bar.Value = (int)Math.Clamp(pct * 10, 0, 1000) / 10;
         _pause.Text = _item.IsActive ? "&Pause" : "&Resume";
         _pause.Enabled = _item.Status != DownloadStatus.Completed;
 
         var segments = _item.SnapshotSegments();
-        _segments.SetSegments(segments, _item.TotalSize);
+        // Streams have no byte ranges; show finished segments as one bar instead.
+        if (hls) segments = _item.StreamTotal > 0 ? [new Segment { Start = 0, End = _item.StreamTotal - 1, Downloaded = _item.StreamDone }] : [];
+        _segments.SetSegments(segments, hls ? _item.StreamTotal : _item.TotalSize);
         _connections.BeginUpdate();
         while (_connections.Items.Count > segments.Count) _connections.Items.RemoveAt(_connections.Items.Count - 1);
         for (int i = 0; i < segments.Count; i++)

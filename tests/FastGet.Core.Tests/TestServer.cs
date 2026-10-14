@@ -20,6 +20,13 @@ sealed class TestServer : IDisposable
         _ = AcceptLoop();
     }
 
+    /// <summary>Serves several files by path instead of one Content for every URL.</summary>
+    public TestServer(Dictionary<string, byte[]> routes) : this(Array.Empty<byte>())
+    {
+        Routes = routes;
+    }
+
+    public Dictionary<string, byte[]>? Routes { get; }
     public byte[] Content { get; }
     public bool Ranges { get; }
     public string? ContentDisposition { get; init; }
@@ -47,8 +54,18 @@ sealed class TestServer : IDisposable
             var stream = client.GetStream();
             var header = await ReadHeader(stream);
             Interlocked.Increment(ref _requests);
+            var content = Content;
+            if (Routes != null)
+            {
+                var path = Regex.Match(header, @"^GET (\S+)").Groups[1].Value.Split('?')[0];
+                if (!Routes.TryGetValue(path, out content!))
+                {
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+                    return;
+                }
+            }
 
-            long start = 0, end = Content.Length - 1;
+            long start = 0, end = content.Length - 1;
             var status = "200 OK";
             var extra = new StringBuilder();
             var m = Regex.Match(header, @"^Range:\s*bytes=(\d+)-(\d*)", RegexOptions.Multiline | RegexOptions.IgnoreCase);
@@ -60,7 +77,7 @@ sealed class TestServer : IDisposable
                     start = long.Parse(m.Groups[1].Value);
                     if (m.Groups[2].Value.Length > 0) end = Math.Min(end, long.Parse(m.Groups[2].Value));
                     status = "206 Partial Content";
-                    extra.Append($"Content-Range: bytes {start}-{end}/{Content.Length}\r\n");
+                    extra.Append($"Content-Range: bytes {start}-{end}/{content.Length}\r\n");
                 }
             }
             if (ContentDisposition != null) extra.Append($"Content-Disposition: {ContentDisposition}\r\n");
@@ -70,7 +87,7 @@ sealed class TestServer : IDisposable
             for (long pos = start; pos <= end; pos += 16384)
             {
                 int n = (int)Math.Min(16384, end - pos + 1);
-                await stream.WriteAsync(Content.AsMemory((int)pos, n));
+                await stream.WriteAsync(content.AsMemory((int)pos, n));
                 if (ChunkDelayMs > 0) await Task.Delay(ChunkDelayMs);
             }
         }

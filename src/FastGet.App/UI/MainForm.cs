@@ -26,6 +26,7 @@ sealed class MainForm : Form
     readonly ConcurrentDictionary<Guid, byte> _dirty = new();
     readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 500 };
     readonly bool _startHidden;
+    readonly QueueScheduler _scheduler;
     ToolStripMenuItem _limiterOn = null!, _limiterOff = null!, _hideCategories = null!;
     string _filter = "all";
     int _sortColumn = -1;
@@ -64,6 +65,7 @@ sealed class MainForm : Form
         _tray.ContextMenuStrip.Items.Add("Open FastGet", null, (_, _) => ShowMain());
         _tray.ContextMenuStrip.Items.Add("Add new download...", null, (_, _) => AddUrl());
         _tray.ContextMenuStrip.Items.Add("Pause all", null, (_, _) => _m.PauseAll());
+        _tray.ContextMenuStrip.Items.Add("Scheduler...", null, (_, _) => ShowScheduler());
         _tray.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         _tray.ContextMenuStrip.Items.Add("Exit", null, (_, _) => ExitApp());
 
@@ -71,7 +73,14 @@ sealed class MainForm : Form
         _m.ItemChanged += i => _dirty[i.Id] = 0;
         _m.ItemRemoved += i => _dirty[i.Id] = 0;
         _m.ItemCompleted += i => BeginInvokeSafe(() => OnCompleted(i));
-        _m.QueueStateChanged += () => BeginInvokeSafe(UpdateCommands);
+        _m.QueueStateChanged += () => BeginInvokeSafe(() => { UpdateCommands(); UpdateStatusBar(); });
+        _m.QueueCompleted += () => BeginInvokeSafe(OnQueueCompleted);
+        _scheduler = new QueueScheduler(_m);
+        _scheduler.Started += () => BeginInvokeSafe(() =>
+        {
+            _m.UpdateSettings(_m.Settings.Clone()); // persist a used-up one-time schedule
+            _tray.ShowBalloonTip(3000, "Scheduler", "The main download queue was started.", ToolTipIcon.Info);
+        });
         _uiTimer.Tick += (_, _) => FlushDirty();
         _uiTimer.Start();
 
@@ -107,6 +116,7 @@ sealed class MainForm : Form
         downloads.DropDownItems.Add(new ToolStripSeparator());
         downloads.DropDownItems.Add(Item("Start &queue", _m.StartQueue));
         downloads.DropDownItems.Add(Item("S&top queue", _m.StopQueue));
+        downloads.DropDownItems.Add(Item("S&cheduler...", ShowScheduler));
         var limiter = new ToolStripMenuItem("Speed &Limiter");
         _limiterOn = Item("Turn o&n", () => SetLimiter(true));
         _limiterOff = Item("Turn of&f", () => SetLimiter(false));
@@ -168,6 +178,7 @@ sealed class MainForm : Form
         _toolbar.Items.Add(new ToolStripSeparator());
         Add("qstart", "Start Queue", Glyphs.Queue, Color.FromArgb(16, 137, 62), _m.StartQueue);
         Add("qstop", "Stop Queue", Glyphs.Queue, Color.FromArgb(196, 43, 28), _m.StopQueue);
+        Add("scheduler", "Scheduler", Glyphs.Clock, Color.FromArgb(0, 120, 215), ShowScheduler);
     }
 
     void BuildTree()
@@ -268,7 +279,9 @@ sealed class MainForm : Form
     string[] Cells(DownloadItem i) =>
     [
         i.FileName,
-        Fmt.Size(i.TotalSize),
+        i.Kind == DownloadKind.Hls && i.Status != DownloadStatus.Completed
+            ? i.ExpectedSize > 0 ? "~" + Fmt.Size(i.ExpectedSize) : "Stream"
+            : Fmt.Size(i.TotalSize),
         Fmt.Status(i),
         Fmt.Time(i.TimeLeft),
         i.IsActive ? Fmt.Speed(i.Speed) : "",
@@ -341,6 +354,10 @@ sealed class MainForm : Form
         _statusText.Text = $"{items.Count} downloads, {active} active" + (_m.QueueRunning ? " — queue running" : "");
         var speed = items.Where(i => i.IsActive).Sum(i => i.Speed);
         _speedText.Text = (speed > 0 ? Fmt.Speed(speed) : "") + (_m.Settings.EffectiveSpeedLimit > 0 ? $"  (limit {_m.Settings.SpeedLimitKBps} KB/s)" : "");
+        var sc = _m.Settings.Schedule;
+        var next = sc.NextStart(DateTime.Now);
+        _statusText.Text += (next is { } n ? $" — queue starts {n:ddd HH:mm}" : "")
+                            + (sc.WhenDone != WhenDoneAction.None ? $" — when done: {WhenDoneText(sc.WhenDone)}" : "");
         var tip = active > 0 ? $"FastGet — {active} active, {Fmt.Speed(speed)}" : "FastGet Download Manager";
         _tray.Text = tip.Length > 63 ? tip[..63] : tip; // NotifyIcon text is limited to 63 characters
     }
@@ -515,6 +532,56 @@ sealed class MainForm : Form
         if (dlg.Selected.Count > 0) _m.StartQueue();
     }
 
+    static string WhenDoneText(WhenDoneAction a) => a switch
+    {
+        WhenDoneAction.ExitApp => "exit",
+        WhenDoneAction.Shutdown => "turn off computer",
+        WhenDoneAction.Sleep => "sleep",
+        WhenDoneAction.Hibernate => "hibernate",
+        _ => "",
+    };
+
+    void ShowScheduler()
+    {
+        using var dlg = new ScheduleForm(_m.Settings);
+        if (dlg.ShowDialog(Visible ? this : null) != DialogResult.OK) return;
+        _m.UpdateSettings(dlg.Result);
+        if (dlg.StartNow) _m.StartQueue();
+        UpdateCommands();
+        UpdateStatusBar();
+    }
+
+    void ShowVideo(BrowserMessage msg)
+    {
+        using var dlg = new VideoForm(_m, msg);
+        dlg.TopMost = !Visible || WindowState == FormWindowState.Minimized;
+        if (dlg.ShowDialog(Visible ? this : null) != DialogResult.OK || dlg.Result == null) return;
+        var item = _m.Add(dlg.Result, dlg.Mode);
+        if (dlg.Mode == AddMode.StartNow && _m.Settings.ShowProgressDialog) ShowProgress(item);
+        if (dlg.Mode == AddMode.Later) SelectQueueAndAsk();
+    }
+
+    void OnQueueCompleted()
+    {
+        var sc = _m.Settings.Schedule;
+        if (sc.WhenDone == WhenDoneAction.None)
+        {
+            _tray.ShowBalloonTip(3000, "Queue finished", "All files in the main download queue were processed.", ToolTipIcon.Info);
+            return;
+        }
+        using (var dlg = new ShutdownForm(sc.WhenDone))
+        {
+            if (dlg.ShowDialog() != DialogResult.OK) return;
+        }
+        _m.Save(); // the list must be on disk before the machine goes down
+        if (sc.WhenDone == WhenDoneAction.ExitApp)
+        {
+            ExitApp();
+            return;
+        }
+        Power.Execute(sc.WhenDone, sc.ForceClose);
+    }
+
     void OnCompleted(DownloadItem item)
     {
         _dirty[item.Id] = 0;
@@ -536,6 +603,9 @@ sealed class MainForm : Form
                 break;
             case "links" when msg.Links is { Count: > 0 }:
                 ShowLinks(msg.Links, msg.Referer, msg.Cookies, msg.UserAgent);
+                break;
+            case "video" when msg.Streams is { Count: > 0 }:
+                ShowVideo(msg);
                 break;
             case "download" when msg.Url != null:
                 Confirm(new NewDownload
@@ -622,6 +692,7 @@ sealed class MainForm : Form
         _tray.Visible = false;
         _tray.Dispose();
         _uiTimer.Dispose();
+        _scheduler.Dispose();
         base.OnFormClosed(e);
     }
 

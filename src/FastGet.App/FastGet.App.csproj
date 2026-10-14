@@ -15,7 +15,10 @@
     <ProjectReference Include="..\FastGet.Core\FastGet.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Ship the browser extension next to the exe so Options can point the user at it. -->
-    <None Include="..\..\extension\**\*" LinkBase="extension" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Ship both browser extensions next to the exe so Options can point the user at them. -->
+    <None Include="..\..\extension\common\*.js;..\..\extension\chrome\manifest.json" Link="extension\chrome\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\extension\common\*.js;..\..\extension\firefox\manifest.json" Link="extension\firefox\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

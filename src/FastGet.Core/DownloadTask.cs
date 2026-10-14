@@ -9,7 +9,14 @@ namespace FastGet.Core;
 /// takes over half of the largest remaining segment ("dynamic segmentation"), so all connections stay busy
 /// until the end instead of the last slow segment dragging on alone.
 /// </summary>
-public sealed class DownloadTask
+public interface IDownloadTask
+{
+    event Action? Changed;
+    Task RunAsync();
+    void Cancel();
+}
+
+public sealed class DownloadTask : IDownloadTask
 {
     public const long MinSplitBytes = 256 * 1024;
     const int BufferSize = 64 * 1024;
@@ -73,7 +80,6 @@ public sealed class DownloadTask
             _file = null;
             Finish();
             _item.Status = DownloadStatus.Completed;
-            _item.InQueue = false;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "FastGet Integration",
+  "description": "Send downloads and links to FastGet Download Manager.",
+  "version": "1.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqe3Oyj8VDa7YUT90CZc42Tdgp9Ym37WW7uKLKgTZDr6rE240uBfcB+88QL6cU1DtamAEZKlVLUqYoihwA7L050PcZx0HddIbij0iiHZBH5vT/cJ3OFcJhd/OzogwSwE4W59m5AOFuK+7hiTwiHzKMvmfEVDJUzctMD9ikxU6vQPRGVUPOuf5kynF52geVAOMUs+13V+EYUfKJbGFkdh/C9/pxhUz1By5PNJATu8xRsMdWLtX9+nCgLyV2V+Xz9fpI5ps0D2OCUJBMJJhzhDAv0Znpht8pp+cXxc97ZrgQ1IohScb/b0PLaUZMC0h3NY5Ywqpo71ySbfqIzuzP68GQwIDAQAB",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "FastGet: capturing downloads (click to turn off)"
+  },
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "nativeMessaging",
+    "cookies",
+    "storage",
+    "scripting",
+    "webRequest",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "minimum_chrome_version": "109",
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}

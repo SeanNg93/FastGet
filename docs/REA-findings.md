@@ -69,3 +69,23 @@ Code của FastGet viết mới hoàn toàn; phần dưới đây chỉ ghi lạ
 - Mặc định 8 kết nối, mở lần lượt cách nhau 150 ms. Chỉ chia đoạn khi phần còn lại ≥ 512 KB.
 - Ghi trực tiếp vào file `.fgpart` theo offset (`RandomAccess.Write`), xong thì đổi tên.
 - Message native messaging là JSON có tên trường, không dùng mảng mã số như IDM.
+
+## Bổ sung: bắt video và hẹn giờ (2026-10-14)
+
+**Quan sát** (quét text trong `background.js`/`content.js` của extension IDM, thuộc Evidence
+`ev_f57cb99b…` ở trên): extension nhận diện media theo `Content-Type`, gồm `video/mp4`, `video/webm`,
+`video/mp2t`, `video/x-…`, các biến thể `mpegurl` (HLS) và `dash+xml` / `.mpd` (DASH).
+
+**Quan sát** (dialog 306 và 150 trong `IDMan.exe`): scheduler có các lựa chọn "One-time downloading /
+Periodic synchronization", "Start download at", "Once at / Daily" kèm các thứ trong tuần, "Stop download at",
+"Number of retries for each file if downloading failed", và nhóm hành động khi xong gồm
+"Exit Internet Download Manager when done", "Turn off computer when done", "Force processes to terminate".
+Dialog 150 là cửa sổ đếm ngược có thanh tiến trình, nút "Shut down now" và nút Cancel.
+
+**Thiết kế riêng của FastGet** (không suy ra từ IDM):
+- Theo dõi media qua `webRequest.onHeadersReceived` cho từng tab, bỏ qua các segment
+  (`.ts`, `.m4s`) và file video dưới 300 KB.
+- Tải HLS: mỗi segment ghi thành một file riêng trong `<tên>.fgparts\` để tải tiếp được theo từng segment;
+  IV mặc định của AES-128 lấy theo số thứ tự segment (RFC 8216).
+- Scheduler cho phép trễ tối đa 30 phút, nên máy vừa thức dậy vẫn khởi động được queue.
+  Queue trống thì không bao giờ kích hoạt tắt máy.

@@ -1,0 +1,45 @@
+{
+  "manifest_version": 2,
+  "name": "FastGet Integration",
+  "description": "Send downloads, links and videos to FastGet Download Manager.",
+  "version": "1.1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fastget@fastget.app",
+      "strict_min_version": "115.0"
+    }
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "FastGet: capturing downloads (click to turn off)"
+  },
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "nativeMessaging",
+    "cookies",
+    "storage",
+    "scripting",
+    "webRequest",
+    "tabs",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}

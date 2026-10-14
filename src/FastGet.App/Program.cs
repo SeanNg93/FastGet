@@ -11,8 +11,7 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
-        // Chrome/Edge start the native messaging host with the extension origin as the first argument.
-        if (args.Length > 0 && args[0].StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase))
+        if (BrowserIntegration.IsNativeHostLaunch(args))
             return NativeHost.Run();
 
         bool background = args.Contains("--background");

@@ -5,13 +5,14 @@ public sealed class DownloadManager : IDisposable
 {
     readonly object _lock = new();
     readonly List<DownloadItem> _items;
-    readonly Dictionary<Guid, DownloadTask> _running = new();
+    readonly Dictionary<Guid, IDownloadTask> _running = new();
     readonly Dictionary<Guid, (long Bytes, DateTime At)> _samples = new();
     readonly HttpClient _http = Http.CreateClient();
     readonly Timer _timer;
     readonly string _listPath;
     readonly string _settingsPath;
     bool _dirty;
+    bool _queueStartedWork;
     DateTime _lastSave = DateTime.MinValue;
 
     public DownloadManager(string dataDir)
@@ -40,6 +41,8 @@ public sealed class DownloadManager : IDisposable
     public event Action<DownloadItem>? ItemChanged;
     public event Action<DownloadItem>? ItemCompleted;
     public event Action? QueueStateChanged;
+    /// <summary>The queue ran out of work on its own (not stopped by the user) — the moment to exit or shut down.</summary>
+    public event Action? QueueCompleted;
 
     public IReadOnlyList<DownloadItem> Items
     {
@@ -50,6 +53,9 @@ public sealed class DownloadManager : IDisposable
     {
         lock (_lock) return _items.FirstOrDefault(i => i.Id == id);
     }
+
+    public Task<List<StreamOption>> InspectStreamAsync(string url, string? referer, string? cookies, string? userAgent, CancellationToken ct) =>
+        Hls.InspectAsync(_http, url, referer, cookies, userAgent ?? Settings.UserAgent, ct);
 
     public Task<ProbeResult> ProbeAsync(string url, string? referer, string? cookies, string? userAgent, CancellationToken ct) =>
         Http.ProbeAsync(_http, url, referer, cookies, userAgent ?? Settings.UserAgent, ct);
@@ -65,6 +71,7 @@ public sealed class DownloadManager : IDisposable
         {
             item = new DownloadItem
             {
+                Kind = d.Kind,
                 Url = d.Url,
                 Referer = d.Referer,
                 Cookies = d.Cookies,
@@ -102,18 +109,21 @@ public sealed class DownloadManager : IDisposable
         for (int n = 2; ; n++)
         {
             var path = Path.Combine(folder, candidate);
-            if (!File.Exists(path) && !File.Exists(path + ".fgpart") && !taken(path)) return candidate;
+            if (!File.Exists(path) && !File.Exists(path + ".fgpart") && !Directory.Exists(path + ".fgparts") && !taken(path))
+                return candidate;
             candidate = $"{stem} ({n}){ext}";
         }
     }
 
     public void Start(DownloadItem item)
     {
-        DownloadTask task;
+        IDownloadTask task;
         lock (_lock)
         {
             if (_running.ContainsKey(item.Id) || item.Status == DownloadStatus.Completed) return;
-            task = new DownloadTask(item, _http, Settings, Limiter);
+            task = item.Kind == DownloadKind.Hls
+                ? new HlsDownloadTask(item, _http, Settings, Limiter)
+                : new DownloadTask(item, _http, Settings, Limiter);
             _running[item.Id] = task;
             _samples[item.Id] = (item.Downloaded, DateTime.UtcNow);
         }
@@ -135,7 +145,7 @@ public sealed class DownloadManager : IDisposable
 
     public void Pause(DownloadItem item)
     {
-        DownloadTask? task;
+        IDownloadTask? task;
         lock (_lock)
         {
             _running.TryGetValue(item.Id, out task);
@@ -173,6 +183,7 @@ public sealed class DownloadManager : IDisposable
                     try
                     {
                         File.Delete(item.PartPath);
+                        if (Directory.Exists(item.SegmentsPath)) Directory.Delete(item.SegmentsPath, recursive: true);
                         if (deleteFiles && item.Status == DownloadStatus.Completed) File.Delete(item.FullPath);
                         return;
                     }
@@ -200,6 +211,9 @@ public sealed class DownloadManager : IDisposable
             lock (item.Segments) item.Segments.Clear();
             item.Status = DownloadStatus.Paused;
             item.TotalSize = -1;
+            item.StreamDone = item.StreamTotal = 0;
+            item.StreamBytes = 0;
+            try { if (Directory.Exists(item.SegmentsPath)) Directory.Delete(item.SegmentsPath, recursive: true); } catch (IOException) { }
             if (File.Exists(item.FullPath) && !File.Exists(item.PartPath))
                 item.FileName = UniqueName(item.SaveFolder, item.FileName, IsTaken);
             try { File.Delete(item.PartPath); } catch (IOException) { }
@@ -227,8 +241,10 @@ public sealed class DownloadManager : IDisposable
         foreach (var item in Items.Where(i => i.InQueue && !i.IsActive && i.Status != DownloadStatus.Completed))
         {
             item.Status = DownloadStatus.Queued;
+            item.QueueAttempts = 0;
             Changed(item);
         }
+        _queueStartedWork = false;
         SetQueueRunning(true);
         PumpQueue();
     }
@@ -241,26 +257,49 @@ public sealed class DownloadManager : IDisposable
 
     void SetQueueRunning(bool running)
     {
-        if (QueueRunning == running) return;
-        QueueRunning = running;
+        lock (_lock)
+        {
+            if (QueueRunning == running) return;
+            QueueRunning = running;
+        }
         QueueStateChanged?.Invoke();
     }
 
     void PumpQueue()
     {
-        if (!QueueRunning) return;
         List<DownloadItem> toStart;
-        bool finished;
+        bool completed = false;
         lock (_lock)
         {
+            if (!QueueRunning) return;
+            // Failed queue items get another chance, up to the scheduler's retry count.
+            foreach (var failed in _items.Where(i => i.InQueue && i.Status == DownloadStatus.Error && !_running.ContainsKey(i.Id)
+                                                     && i.QueueAttempts < Settings.Schedule.QueueRetries))
+            {
+                failed.QueueAttempts++;
+                failed.Status = DownloadStatus.Queued;
+            }
             int free = Settings.MaxConcurrent - _running.Count;
             toStart = _items.Where(i => i.InQueue && i.Status == DownloadStatus.Queued && !_running.ContainsKey(i.Id))
                 .Take(Math.Max(0, free)).ToList();
-            finished = toStart.Count == 0
-                       && !_items.Any(i => i.InQueue && (i.Status == DownloadStatus.Queued || _running.ContainsKey(i.Id)));
+            if (toStart.Count > 0) _queueStartedWork = true;
+            bool finished = toStart.Count == 0
+                            && !_items.Any(i => i.InQueue && (i.Status == DownloadStatus.Queued || _running.ContainsKey(i.Id)));
+            if (finished)
+            {
+                // Decided under the lock so two downloads finishing together cannot both report completion.
+                QueueRunning = false;
+                // An empty queue that "finishes" instantly must never trigger shutdown.
+                completed = _queueStartedWork;
+                _queueStartedWork = false;
+            }
         }
         foreach (var item in toStart) Start(item);
-        if (finished) SetQueueRunning(false);
+        if (!QueueRunning && toStart.Count == 0)
+        {
+            QueueStateChanged?.Invoke();
+            if (completed) QueueCompleted?.Invoke();
+        }
     }
 
     public void UpdateSettings(AppSettings settings)
@@ -280,6 +319,7 @@ public sealed class DownloadManager : IDisposable
         Settings.AutoExtensions = settings.AutoExtensions;
         Settings.UserAgent = settings.UserAgent;
         Settings.Categories = settings.Categories;
+        Settings.Schedule = settings.Schedule;
         Limiter.BytesPerSecond = Settings.EffectiveSpeedLimit;
         JsonFile.Save(_settingsPath, Settings);
         PumpQueue();
@@ -337,7 +377,7 @@ public sealed class DownloadManager : IDisposable
     public void Dispose()
     {
         _timer.Dispose();
-        List<DownloadTask> tasks;
+        List<IDownloadTask> tasks;
         lock (_lock) tasks = _running.Values.ToList();
         foreach (var t in tasks) t.Cancel();
         // Let workers record their final positions before the last save.

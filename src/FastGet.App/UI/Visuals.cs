@@ -68,8 +68,8 @@ static class Fmt
         DownloadStatus.Connecting => "Connecting...",
         DownloadStatus.Queued => "Queued",
         DownloadStatus.Error => "Error",
-        DownloadStatus.Downloading => i.TotalSize > 0 ? $"{i.Progress * 100:0.00}%" : Size(i.Downloaded),
-        _ => i.Downloaded > 0 && i.TotalSize > 0 ? $"{i.Progress * 100:0.00}%" : "",
+        DownloadStatus.Downloading => i.HasKnownProgress ? $"{i.Progress * 100:0.00}%" : Size(i.Downloaded),
+        _ => i.Downloaded > 0 && i.HasKnownProgress ? $"{i.Progress * 100:0.00}%" : "",
     };
 }
 
@@ -79,7 +79,7 @@ static class Glyphs
     public const string Add = "", Play = "", Pause = "", Stop = "", Delete = "",
         Clear = "", Settings = "", Queue = "", Download = "", Folder = "",
         Video = "", Music = "", Document = "", Package = "", Apps = "",
-        Check = "", Sync = "", All = "", Link = "", Batch = "";
+        Check = "", Sync = "", All = "", Link = "", Batch = "", Clock = "";
 
     static readonly FontFamily? Family = FontFamily.Families.FirstOrDefault(f => f.Name == "Segoe MDL2 Assets");
 

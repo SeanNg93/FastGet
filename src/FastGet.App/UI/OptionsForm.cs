@@ -68,7 +68,7 @@ sealed class OptionsForm : Form
         _progressDialog.Checked = _s.ShowProgressDialog;
         _completeDialog.Checked = _s.ShowCompleteDialog;
 
-        var group = new GroupBox { Text = "Browser integration (Chrome, Edge, Brave)", Location = new Point(8, 136), Size = new Size(520, 190) };
+        var group = new GroupBox { Text = "Browser integration (Chrome, Edge, Brave, Firefox)", Location = new Point(8, 136), Size = new Size(520, 190) };
         _integrationStatus.Location = new Point(12, 24);
         var install = new Button { Text = "Install", Location = new Point(12, 50), Size = new Size(100, 28) };
         var uninstall = new Button { Text = "Uninstall", Location = new Point(120, 50), Size = new Size(100, 28) };
@@ -76,11 +76,11 @@ sealed class OptionsForm : Form
         var help = new Label
         {
             Location = new Point(12, 88), Size = new Size(496, 96), ForeColor = Color.DimGray,
-            Text = "1. Click Install to register FastGet with the browsers.\n" +
-                   "2. Open chrome://extensions (or edge://extensions), turn on Developer mode,\n" +
-                   "    click \"Load unpacked\" and choose the extension folder.\n" +
-                   "3. Downloads matching your file types and the right-click menu \"Download with FastGet\"\n" +
-                   "    are then sent here.",
+            Text = "1. Click Install to register FastGet with all supported browsers.\n" +
+                   "2. Chrome/Edge/Brave: open chrome://extensions, turn on Developer mode,\n" +
+                   "    click \"Load unpacked\" and choose the \"chrome\" folder.\n" +
+                   "3. Firefox: about:debugging → This Firefox → \"Load Temporary Add-on\",\n" +
+                   "    pick firefox\\manifest.json (a signed .xpi is needed for permanent use).",
         };
         install.Click += (_, _) => { BrowserIntegration.Install(); RefreshIntegration(); };
         uninstall.Click += (_, _) => { BrowserIntegration.Uninstall(); RefreshIntegration(); };
