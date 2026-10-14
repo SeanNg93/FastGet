@@ -8,7 +8,7 @@ sealed class ProgressForm : Form
     readonly DownloadManager _manager;
     readonly DownloadItem _item;
     readonly Label _url = Value(), _status = Value(), _size = Value(), _downloaded = Value(), _rate = Value(), _left = Value(), _resume = Value();
-    readonly ProgressBar _bar = new() { Location = new Point(14, 196), Size = new Size(536, 20) };
+    readonly SmoothProgressBar _bar = new() { Location = new Point(14, 196), Size = new Size(536, 20) };
     readonly Button _details = new() { Text = "<< Hide &details", Location = new Point(14, 228), Size = new Size(130, 28) };
     readonly Button _pause = new() { Text = "&Pause", Location = new Point(334, 228), Size = new Size(104, 28) };
     readonly Button _cancel = new() { Text = "&Cancel", Location = new Point(446, 228), Size = new Size(104, 28) };
@@ -19,7 +19,12 @@ sealed class ProgressForm : Form
         Location = new Point(14, 54), Size = new Size(536, 146), View = View.Details, FullRowSelect = true,
         HeaderStyle = ColumnHeaderStyle.Nonclickable,
     };
+    /// <summary>Text fields: twice a second is readable.</summary>
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
+    /// <summary>Bars: every frame (~60 fps; WinForms timers tick at most every ~15 ms).</summary>
+    readonly System.Windows.Forms.Timer _frame = new() { Interval = 15 };
+    readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+    TimeSpan _lastFrame;
 
     public ProgressForm(DownloadManager manager, DownloadItem item)
     {
@@ -66,8 +71,15 @@ sealed class ProgressForm : Form
         };
         _timer.Tick += (_, _) => RefreshView();
         _timer.Start();
-        FormClosed += (_, _) => _timer.Dispose();
+        _frame.Tick += (_, _) => RefreshBars();
+        _frame.Start();
+        FormClosed += (_, _) =>
+        {
+            _timer.Dispose();
+            _frame.Dispose();
+        };
         RefreshView();
+        RefreshBars();
     }
 
     public Guid ItemId => _item.Id;
@@ -106,15 +118,11 @@ sealed class ProgressForm : Form
         _rate.Text = Fmt.Speed(_item.Speed);
         _left.Text = Fmt.Time(_item.TimeLeft);
         _resume.Text = hls ? "Yes (by segment)" : _item.TotalSize < 0 && !_item.Resumable && _item.Status == DownloadStatus.Connecting ? "" : _item.Resumable ? "Yes" : "No";
-        _bar.Style = _item.HasKnownProgress || !_item.IsActive ? ProgressBarStyle.Continuous : ProgressBarStyle.Marquee;
-        _bar.Value = (int)Math.Clamp(pct * 10, 0, 1000) / 10;
         _pause.Text = _item.IsActive ? "&Pause" : "&Resume";
         _pause.Enabled = _item.Status != DownloadStatus.Completed;
 
         var segments = _item.SnapshotSegments();
-        // Streams have no byte ranges; show finished segments as one bar instead.
-        if (hls) segments = _item.StreamTotal > 0 ? [new Segment { Start = 0, End = _item.StreamTotal - 1, Downloaded = _item.StreamDone }] : [];
-        _segments.SetSegments(segments, hls ? _item.StreamTotal : _item.TotalSize);
+        if (hls) segments = HlsSegments();
         _connections.BeginUpdate();
         while (_connections.Items.Count > segments.Count) _connections.Items.RemoveAt(_connections.Items.Count - 1);
         for (int i = 0; i < segments.Count; i++)
@@ -135,5 +143,23 @@ sealed class ProgressForm : Form
         _connections.EndUpdate();
 
         if (_item.Status == DownloadStatus.Completed) Close();
+    }
+
+    // Streams have no byte ranges; show finished segments as one bar instead.
+    List<Segment> HlsSegments() =>
+        _item.StreamTotal > 0 ? [new Segment { Start = 0, End = _item.StreamTotal - 1, Downloaded = _item.StreamDone }] : [];
+
+    /// <summary>Runs every frame with the live byte counts, so the bars move continuously.</summary>
+    void RefreshBars()
+    {
+        var now = _clock.Elapsed;
+        var dt = (now - _lastFrame).TotalSeconds;
+        _lastFrame = now;
+        _bar.Indeterminate = _item.IsActive && !_item.HasKnownProgress;
+        _bar.Target = _item.Progress;
+        _bar.Step(dt);
+        bool hls = _item.Kind == DownloadKind.Hls;
+        if (_detailPanel.Visible)
+            _segments.SetSegments(hls ? HlsSegments() : _item.SnapshotSegments(), hls ? _item.StreamTotal : _item.TotalSize);
     }
 }

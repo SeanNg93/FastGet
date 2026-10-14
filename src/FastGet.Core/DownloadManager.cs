@@ -6,7 +6,9 @@ public sealed class DownloadManager : IDisposable
     readonly object _lock = new();
     readonly List<DownloadItem> _items;
     readonly Dictionary<Guid, IDownloadTask> _running = new();
-    readonly Dictionary<Guid, (long Bytes, DateTime At)> _samples = new();
+    /// <summary>Recent (bytes, time) samples per running download; speed is measured over this sliding window.</summary>
+    readonly Dictionary<Guid, Queue<(long Bytes, DateTime At)>> _samples = new();
+    static readonly TimeSpan SpeedWindow = TimeSpan.FromSeconds(2);
     readonly HttpClient _http = Http.CreateClient();
     readonly Timer _timer;
     readonly string _listPath;
@@ -28,12 +30,14 @@ public sealed class DownloadManager : IDisposable
         foreach (var item in _items.Where(i => i.IsActive))
             item.Status = DownloadStatus.Paused; // app was closed or crashed mid-download
 
-        _timer = new Timer(_ => Tick(), null, 500, 500);
+        _timer = new Timer(_ => Tick(), null, 250, 250);
     }
 
     public string DataDir { get; }
     public AppSettings Settings { get; private set; }
     public SpeedLimiter Limiter { get; } = new();
+    /// <summary>Per-server connection limits learned during this session.</summary>
+    public HostLimits HostLimits { get; } = new();
     public bool QueueRunning { get; private set; }
 
     public event Action<DownloadItem>? ItemAdded;
@@ -136,9 +140,9 @@ public sealed class DownloadManager : IDisposable
             if (_running.ContainsKey(item.Id) || item.Status == DownloadStatus.Completed) return;
             task = item.Kind == DownloadKind.Hls
                 ? new HlsDownloadTask(item, _http, Settings, Limiter)
-                : new DownloadTask(item, _http, Settings, Limiter);
+                : new DownloadTask(item, _http, Settings, Limiter, HostLimits);
             _running[item.Id] = task;
-            _samples[item.Id] = (item.Downloaded, DateTime.UtcNow);
+            _samples[item.Id] = new Queue<(long, DateTime)>([(item.Downloaded, DateTime.UtcNow)]);
         }
         task.Changed += () => Changed(item);
         _ = Task.Run(async () =>
@@ -355,13 +359,15 @@ public sealed class DownloadManager : IDisposable
             var bytes = item.Downloaded;
             lock (_lock)
             {
-                if (!_samples.TryGetValue(item.Id, out var prev)) continue;
-                var seconds = (now - prev.At).TotalSeconds;
+                if (!_samples.TryGetValue(item.Id, out var window)) continue;
+                window.Enqueue((bytes, now));
+                // Keep one sample older than the window so the rate always spans the full window once available.
+                while (window.Count > 2 && now - window.ElementAt(1).At >= SpeedWindow) window.Dequeue();
+                var (oldBytes, oldAt) = window.Peek();
+                var seconds = (now - oldAt).TotalSeconds;
                 if (seconds <= 0) continue;
-                var instant = Math.Max(0, bytes - prev.Bytes) / seconds;
-                // Smooth like a progress dialog should, but react quickly when a download starts.
-                item.Speed = item.Speed <= 0 ? instant : item.Speed * 0.7 + instant * 0.3;
-                _samples[item.Id] = (bytes, now);
+                // Bytes over the last ~2 s: steady to read, yet a real slowdown shows within a couple of seconds.
+                item.Speed = Math.Max(0, bytes - oldBytes) / seconds;
             }
             ItemChanged?.Invoke(item);
         }

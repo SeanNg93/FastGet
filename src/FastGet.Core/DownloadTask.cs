@@ -1,14 +1,10 @@
 using System.Buffers;
 using System.Net;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace FastGet.Core;
 
-/// <summary>
-/// Runs one download with several connections. Each connection owns a segment; when a connection finishes it
-/// takes over half of the largest remaining segment ("dynamic segmentation"), so all connections stay busy
-/// until the end instead of the last slow segment dragging on alone.
-/// </summary>
 public interface IDownloadTask
 {
     event Action? Changed;
@@ -16,33 +12,52 @@ public interface IDownloadTask
     void Cancel();
 }
 
+/// <summary>
+/// Runs one download with several connections. Each connection owns a segment; when a connection finishes it
+/// takes over half of the largest remaining segment ("dynamic segmentation"), so all connections stay busy
+/// until the end instead of the last slow segment dragging on alone.
+/// The number of connections adapts to the server: if it answers 429/503 to an extra connection, that connection's
+/// work goes back to the one it was split from and the download continues with fewer connections.
+/// </summary>
 public sealed class DownloadTask : IDownloadTask
 {
     public const long MinSplitBytes = 256 * 1024;
     const int BufferSize = 64 * 1024;
-    static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>A connection that receives nothing for this long is dropped and reopened. Settable for tests.</summary>
+    public static TimeSpan ReadTimeout { get; set; } = TimeSpan.FromSeconds(10);
+    static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(8);
 
     readonly DownloadItem _item;
     readonly HttpClient _http;
     readonly AppSettings _settings;
     readonly SpeedLimiter _limiter;
+    readonly HostLimits _hostLimits;
     readonly CancellationTokenSource _cts = new();
     SafeFileHandle? _file;
     Uri _uri;
     Exception? _fatal;
+    int _allowed;
+    int _workers;
+    long _lastLimitTicks = DateTime.UtcNow.Ticks;
+    /// <summary>After this long without a 429/503, try one more connection (up to the configured number).</summary>
+    static readonly TimeSpan RampUpInterval = TimeSpan.FromSeconds(10);
 
-    public DownloadTask(DownloadItem item, HttpClient http, AppSettings settings, SpeedLimiter limiter)
+    public DownloadTask(DownloadItem item, HttpClient http, AppSettings settings, SpeedLimiter limiter, HostLimits? hostLimits = null)
     {
         _item = item;
         _http = http;
         _settings = settings;
         _limiter = limiter;
+        _hostLimits = hostLimits ?? new HostLimits();
         _uri = new Uri(item.Url);
     }
 
     public event Action? Changed;
 
     public void Cancel() => _cts.Cancel();
+
+    /// <summary>Most connections running at the same moment during this download (for diagnostics and tests).</summary>
+    public int PeakConnections { get; private set; }
 
     public async Task RunAsync()
     {
@@ -57,12 +72,12 @@ public sealed class DownloadTask : IDownloadTask
             _item.Status = DownloadStatus.Downloading;
             Changed?.Invoke();
 
-            int connections = _item.Resumable && _item.TotalSize > 0 ? _settings.Connections : 1;
+            int connections = _item.Resumable && _item.TotalSize > 0 ? _hostLimits.Get(_uri.Host, _settings.Connections) : 1;
+            _allowed = connections;
             using var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var workers = Enumerable.Range(0, connections).Select(i => WorkerAsync(i, run)).ToArray();
             try
             {
-                await Task.WhenAll(workers);
+                await SuperviseAsync(connections, run);
             }
             catch when (_fatal != null && !ct.IsCancellationRequested)
             {
@@ -76,6 +91,7 @@ public sealed class DownloadTask : IDownloadTask
                     throw new IOException("Download ended before all parts were received.");
             }
             if (_item.TotalSize < 0) _item.TotalSize = _item.Downloaded;
+            SetSparse(_file!, false);
             _file?.Dispose();
             _file = null;
             Finish();
@@ -106,10 +122,57 @@ public sealed class DownloadTask : IDownloadTask
         }
     }
 
+    /// <summary>
+    /// Runs the workers and, while the server has not refused a connection for a while, adds one more connection
+    /// at a time up to the configured number (additive increase after a 429/503 decrease).
+    /// </summary>
+    async Task SuperviseAsync(int connections, CancellationTokenSource run)
+    {
+        var tasks = new List<Task>();
+        int next = 0;
+        for (; next < connections; next++) tasks.Add(WorkerAsync(next, run));
+        int target = _item.Resumable && _item.TotalSize > 0 ? _settings.Connections : 1;
+        while (true)
+        {
+            var all = Task.WhenAll(tasks);
+            await Task.WhenAny(all, Task.Delay(1000));
+            if (all.IsCompleted)
+            {
+                await all; // surface worker exceptions
+                return;
+            }
+            if (run.IsCancellationRequested) continue;
+            var quiet = DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastLimitTicks), DateTimeKind.Utc);
+            if (Volatile.Read(ref _allowed) < target && quiet >= RampUpInterval && HasSplittableWork())
+            {
+                Interlocked.Increment(ref _allowed);
+                Interlocked.Exchange(ref _lastLimitTicks, DateTime.UtcNow.Ticks); // space out the next probe
+                tasks.Add(WorkerAsync(next++, run));
+            }
+        }
+    }
+
+    bool HasSplittableWork()
+    {
+        lock (_item.Segments) return _item.Segments.Any(s => !s.IsDone && (!s.Active || s.Remaining >= 4 * MinSplitBytes));
+    }
+
     async Task PrepareAsync(CancellationToken ct)
     {
         var ua = _item.UserAgent ?? _settings.UserAgent;
-        var probe = await Http.ProbeAsync(_http, _item.Url, _item.Referer, _item.Cookies, ua, ct);
+        ProbeResult probe;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                probe = await Http.ProbeAsync(_http, _item.Url, _item.Referer, _item.Cookies, ua, ct);
+                break;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && attempt <= _settings.MaxRetries && IsRetryable(ex))
+            {
+                await Task.Delay(RetryDelay(attempt, ex), ct);
+            }
+        }
         _uri = probe.FinalUri;
 
         bool canContinue = _item.Segments.Count > 0
@@ -135,6 +198,21 @@ public sealed class DownloadTask : IDownloadTask
             File.Delete(_item.PartPath);
         }
         _file = File.OpenHandle(_item.PartPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
+        // Connections write far apart in the file. In a normal file every write past the end makes Windows fill the
+        // gap with zeros first (measured ~47 ms per 190 MB on an SSD, much more on HDDs); a sparse file skips that.
+        SetSparse(_file, true);
+    }
+
+    static bool IsRetryable(Exception ex) =>
+        ex is HttpStatusException { IsFatal: false } or HttpRequestException or IOException or TimeoutException
+            or TaskCanceledException;
+
+    /// <summary>0.5 s, 1 s, 2 s, 4 s, then 8 s; a server-provided Retry-After wins (capped at 60 s).</summary>
+    static TimeSpan RetryDelay(int attempt, Exception? ex)
+    {
+        if (ex is HttpStatusException { RetryAfter: { } after }) return after < TimeSpan.FromSeconds(60) ? after : TimeSpan.FromSeconds(60);
+        var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, Math.Min(attempt - 1, 10)));
+        return delay < MaxRetryDelay ? delay : MaxRetryDelay;
     }
 
     async Task WorkerAsync(int index, CancellationTokenSource run)
@@ -142,25 +220,49 @@ public sealed class DownloadTask : IDownloadTask
         var ct = run.Token;
         // Open connections gradually, like a browser would, instead of hitting the server all at once.
         if (index > 0) await Task.Delay(index * 150, ct);
+        Interlocked.Increment(ref _workers);
+        bool retired = false;
+        try
+        {
+            retired = await WorkLoopAsync(index, run);
+        }
+        finally
+        {
+            if (!retired) Interlocked.Decrement(ref _workers);
+        }
+    }
+
+    /// <summary>Returns true when the worker already removed itself from the worker count.</summary>
+    async Task<bool> WorkLoopAsync(int index, CancellationTokenSource run)
+    {
+        var ct = run.Token;
         int failures = 0;
         while (!ct.IsCancellationRequested)
         {
-            var seg = Acquire();
-            if (seg == null) return;
+            // The server told us to use fewer connections: surplus workers stop instead of fighting for a slot.
+            if (TryRetire()) return true;
+            var seg = Acquire(out var splitFrom);
+            if (seg == null) return false;
             Exception? error = null;
+            bool received = false;
             try
             {
-                await FetchAsync(seg, ct);
+                await FetchAsync(seg, ct, () =>
+                {
+                    if (received) return;
+                    received = true;
+                    _hostLimits.Observe(_uri.Host, ActiveCount());
+                });
                 failures = 0;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                return;
+                return false;
             }
             catch (Exception ex)
             {
                 error = ex;
-                SetInfo(seg, "Error: " + ex.Message);
+                SetInfo(seg, "Error: " + (ex is HttpRequestException { InnerException: { } inner } ? inner.Message : ex.Message));
             }
             finally
             {
@@ -168,21 +270,53 @@ public sealed class DownloadTask : IDownloadTask
             }
             if (error == null) continue;
 
+            // An extra connection refused with 429/503 while others are working means "too many connections":
+            // give its fresh piece back to the connection it was split from and stop this one immediately.
+            if (!received && error is HttpStatusException { IsServerLimit: true } && OtherActive(seg))
+            {
+                Unsplit(seg, splitFrom);
+                int active = ActiveCount();
+                Interlocked.Exchange(ref _lastLimitTicks, DateTime.UtcNow.Ticks);
+                InterlockedMin(ref _allowed, Math.Max(1, active));
+                _hostLimits.Lower(_uri.Host, Math.Max(1, active));
+                return false;
+            }
+
             bool fatal = error is HttpStatusException { IsFatal: true } or UnauthorizedAccessException;
             if (fatal || ++failures > _settings.MaxRetries)
             {
-                // Extra connections that the server refuses are not an error while others still make progress.
-                if (!fatal && index > 0 && OtherActive(seg)) return;
+                // Extra connections that keep failing are not an error while others still make progress.
+                if (!fatal && index > 0 && OtherActive(seg)) return false;
                 _fatal ??= error;
                 run.Cancel();
-                return;
+                return false;
             }
-            await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 2 * failures)), ct);
+            // A connection that went silent is reopened at once; other errors back off briefly.
+            if (error is not TimeoutException || failures > 1)
+                await Task.Delay(RetryDelay(failures, error), ct);
+        }
+        return false;
+    }
+
+    bool TryRetire()
+    {
+        while (true)
+        {
+            int workers = Volatile.Read(ref _workers);
+            if (workers <= Volatile.Read(ref _allowed)) return false;
+            if (Interlocked.CompareExchange(ref _workers, workers - 1, workers) == workers) return true;
         }
     }
 
-    Segment? Acquire()
+    static void InterlockedMin(ref int target, int value)
     {
+        int current;
+        while ((current = Volatile.Read(ref target)) > value && Interlocked.CompareExchange(ref target, value, current) != current) { }
+    }
+
+    Segment? Acquire(out Segment? splitFrom)
+    {
+        splitFrom = null;
         lock (_item.Segments)
         {
             var idle = _item.Segments.FirstOrDefault(s => !s.Active && !s.IsDone);
@@ -190,6 +324,7 @@ public sealed class DownloadTask : IDownloadTask
             {
                 idle.Active = true;
                 idle.Info = "Connecting...";
+                Track();
                 return idle;
             }
             if (!_item.Resumable || _item.TotalSize <= 0) return null;
@@ -201,7 +336,25 @@ public sealed class DownloadTask : IDownloadTask
             var split = new Segment { Start = mid, End = largest.End, Active = true, Info = "Connecting..." };
             largest.End = mid - 1;
             _item.Segments.Insert(_item.Segments.IndexOf(largest) + 1, split);
+            splitFrom = largest;
+            Track();
             return split;
+        }
+    }
+
+    void Track() => PeakConnections = Math.Max(PeakConnections, _item.Segments.Count(s => s.Active));
+
+    /// <summary>
+    /// Undo a split whose new connection was refused: the original connection's request still covers the range,
+    /// so extending its end lets it keep streaming those bytes without a new request.
+    /// </summary>
+    void Unsplit(Segment seg, Segment? from)
+    {
+        lock (_item.Segments)
+        {
+            if (from == null || seg.Downloaded != 0 || !from.Active || from.End != seg.Start - 1) return;
+            from.End = seg.End;
+            _item.Segments.Remove(seg);
         }
     }
 
@@ -215,12 +368,17 @@ public sealed class DownloadTask : IDownloadTask
         lock (_item.Segments) return _item.Segments.Any(s => s != seg && s.Active);
     }
 
+    int ActiveCount()
+    {
+        lock (_item.Segments) return _item.Segments.Count(s => s.Active);
+    }
+
     void SetInfo(Segment seg, string info)
     {
         lock (_item.Segments) seg.Info = info;
     }
 
-    async Task FetchAsync(Segment seg, CancellationToken ct)
+    async Task FetchAsync(Segment seg, CancellationToken ct, Action onData)
     {
         long from, to;
         lock (_item.Segments)
@@ -233,8 +391,8 @@ public sealed class DownloadTask : IDownloadTask
 
         using var req = Http.NewRequest(_uri, _item.Referer, _item.Cookies, _item.UserAgent ?? _settings.UserAgent);
         if (_item.Resumable) req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(from, to >= 0 ? to : null);
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (!resp.IsSuccessStatusCode) throw new HttpStatusException(resp.StatusCode);
+        using var resp = await Http.SendAsync(_http, req, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!resp.IsSuccessStatusCode) throw HttpStatusException.From(resp);
         if (_item.Resumable && resp.StatusCode != HttpStatusCode.PartialContent)
             throw new IOException("Server ignored the range request.");
 
@@ -254,7 +412,7 @@ public sealed class DownloadTask : IDownloadTask
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    throw new TimeoutException("Connection timed out.");
+                    throw new TimeoutException($"No data for {ReadTimeout.TotalSeconds:0} seconds; reconnecting.");
                 }
 
                 if (read == 0)
@@ -266,6 +424,7 @@ public sealed class DownloadTask : IDownloadTask
                     }
                     return;
                 }
+                onData();
 
                 await _limiter.WaitAsync(read, ct);
                 long pos;
@@ -300,4 +459,18 @@ public sealed class DownloadTask : IDownloadTask
             _item.FileName = DownloadManager.UniqueName(_item.SaveFolder, _item.FileName, _ => false);
         File.Move(part, _item.FullPath);
     }
+
+    /// <summary>Best effort: unsupported file systems (FAT32, network shares) simply keep the normal behaviour.</summary>
+    static void SetSparse(SafeFileHandle file, bool sparse)
+    {
+        if (!OperatingSystem.IsWindows() || file.IsInvalid || file.IsClosed) return;
+        const uint FSCTL_SET_SPARSE = 0x900C4;
+        // FILE_SET_SPARSE_BUFFER is a single BOOLEAN byte.
+        var flag = new byte[] { (byte)(sparse ? 1 : 0) };
+        DeviceIoControl(file, FSCTL_SET_SPARSE, flag, flag.Length, IntPtr.Zero, 0, out _, IntPtr.Zero);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[] inBuffer, int inSize, IntPtr outBuffer, int outSize,
+        out int returned, IntPtr overlapped);
 }

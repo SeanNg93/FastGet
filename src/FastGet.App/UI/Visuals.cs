@@ -186,6 +186,74 @@ sealed class FileIcons
     static extern bool DestroyIcon(IntPtr handle);
 }
 
+/// <summary>
+/// Progress bar drawn by hand and animated every frame. The native ProgressBar animates its own transitions slowly,
+/// which looks like stepping when the value is updated a few times per second.
+/// </summary>
+sealed class SmoothProgressBar : Control
+{
+    double _shown;
+    double _marquee;
+
+    public SmoothProgressBar()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        Height = 20;
+    }
+
+    /// <summary>Real progress, 0..1.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public double Target { get; set; }
+    /// <summary>Size unknown: show a moving block instead of a fill.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool Indeterminate { get; set; }
+
+    /// <summary>Moves the drawn value toward <see cref="Target"/>; call once per frame with the elapsed time.</summary>
+    public void Step(double seconds)
+    {
+        var before = (_shown, _marquee);
+        if (Indeterminate)
+        {
+            _marquee = (_marquee + seconds * 0.6) % 1.4;
+        }
+        else if (Target < _shown || Target - _shown < 0.0005)
+        {
+            _shown = Target; // restarts jump back; tiny gaps are not worth animating
+        }
+        else
+        {
+            // Exponential easing: covers ~95% of the gap in 0.3 s, so it follows the data without lagging behind.
+            _shown += (Target - _shown) * (1 - Math.Exp(-seconds * 10));
+        }
+        if (before != (_shown, _marquee)) Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (var back = new SolidBrush(Color.FromArgb(230, 230, 230))) g.FillRectangle(back, r);
+        RectangleF fill;
+        if (Indeterminate)
+        {
+            float w = r.Width * 0.25f;
+            fill = new RectangleF((float)(_marquee - 0.2) * r.Width, 1, w, r.Height - 1);
+        }
+        else
+        {
+            fill = new RectangleF(1, 1, (float)(_shown * (r.Width - 1)), r.Height - 1);
+        }
+        fill.Intersect(new RectangleF(1, 1, r.Width - 1, r.Height - 1));
+        if (fill.Width > 0)
+        {
+            using var brush = new System.Drawing.Drawing2D.LinearGradientBrush(new RectangleF(0, 0, 1, r.Height + 1),
+                Color.FromArgb(34, 180, 60), Color.FromArgb(6, 140, 37), 90f);
+            g.FillRectangle(brush, fill);
+        }
+        g.DrawRectangle(Pens.Silver, r);
+    }
+}
+
 /// <summary>Shows where each connection started and how far it got, like the classic "download progress by connections" bar.</summary>
 sealed class SegmentBar : Control
 {

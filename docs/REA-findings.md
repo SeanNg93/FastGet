@@ -89,3 +89,17 @@ Dialog 150 là cửa sổ đếm ngược có thanh tiến trình, nút "Shut do
   IV mặc định của AES-128 lấy theo số thứ tự segment (RFC 8216).
 - Scheduler cho phép trễ tối đa 30 phút, nên máy vừa thức dậy vẫn khởi động được queue.
   Queue trống thì không bao giờ kích hoạt tắt máy.
+
+## Bổ sung: tốc độ tải và giới hạn kết nối (2026-10-14)
+
+**Quan sát từ IDM** (resource `IDMan.exe`, Evidence `ev_c2e06fd0…`, và tab Options → Save to):
+- Dialog 226 *"Max. connections number for a server"* và danh sách *Exceptions* trong tab Connection: IDM giới hạn số kết nối theo từng server.
+- Tab Save to: *"Temporary directory is required for storing file parts during download … faster assembling of downloaded files"*. IDM ghi từng phần ra file riêng rồi ghép lại.
+
+**Đo trên FastGet** (file 100 MB, `sin-speed.hetzner.com`):
+- Server trả `429 Too Many Requests` khi có hơn khoảng 4 kết nối từ một IP (kiểm chứng bằng 10 lệnh curl song song).
+- Engine cũ coi 429 là lỗi tạm và cho luồng ngủ 2–30 giây, để phần việc đã cắt sẵn nằm không ai nhận: 40/105 lần đo tụt dưới 25% trung vị, tốc độ trung bình 3,71 MB/s.
+- Ghi vào một file chung ở nhiều vị trí khiến Windows phải ghi số 0 vào khoảng trống: khoảng 47 ms cho mỗi đoạn 190 MB trên SSD, còn file sparse chỉ mất 0,1 ms.
+- Một server không bao giờ trả header làm engine cũ treo vô thời hạn vì không có giới hạn thời gian chờ header.
+
+**Thiết kế của FastGet**: tự giảm số kết nối khi gặp 429/503 và trả phần việc về cho kết nối gốc; cứ 10 giây yên ổn thì thử tăng thêm 1 kết nối; nhớ giới hạn theo từng host; chờ thử lại 0,5–8 giây và tôn trọng `Retry-After`; giới hạn 20 giây chờ header và 10 giây không nhận dữ liệu; dùng file sparse thay vì file riêng cho từng phần, để khỏi tốn bước ghép. Sau khi sửa: 1/54 lần đo bị tụt, 7,19 MB/s.

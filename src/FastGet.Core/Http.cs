@@ -5,13 +5,44 @@ namespace FastGet.Core;
 
 public sealed record ProbeResult(Uri FinalUri, long Size, bool Resumable, string FileName, string? ContentType);
 
-public sealed class HttpStatusException(HttpStatusCode code)
+public sealed class HttpStatusException(HttpStatusCode code, TimeSpan? retryAfter = null)
     : Exception($"Server returned {(int)code} {code}")
 {
     public HttpStatusCode Code { get; } = code;
+    public TimeSpan? RetryAfter { get; } = retryAfter;
 
     /// <summary>4xx errors other than timeouts/throttling will not go away by retrying.</summary>
     public bool IsFatal => (int)Code is >= 400 and < 500 and not 408 and not 429;
+
+    /// <summary>"Too many connections" style answers: the server is fine but wants fewer parallel requests.</summary>
+    public bool IsServerLimit => Code is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable;
+
+    public static HttpStatusException From(HttpResponseMessage resp)
+    {
+        var ra = resp.Headers.RetryAfter;
+        TimeSpan? after = ra?.Delta ?? (ra?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
+        return new HttpStatusException(resp.StatusCode, after is { } a && a > TimeSpan.Zero ? a : null);
+    }
+}
+
+/// <summary>
+/// Highest number of parallel connections each server accepted, learned from 429/503 answers, so later downloads
+/// from the same host start with the right number instead of being refused again.
+/// </summary>
+public sealed class HostLimits
+{
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _limits = new(StringComparer.OrdinalIgnoreCase);
+
+    public int Get(string host, int wanted) => _limits.TryGetValue(host, out var limit) ? Math.Min(limit, wanted) : wanted;
+
+    /// <summary>A host that now serves more parallel connections than its recorded limit gets the higher limit.</summary>
+    public void Observe(string host, int working)
+    {
+        if (_limits.TryGetValue(host, out var limit) && working > limit) _limits.TryUpdate(host, working, limit);
+    }
+
+    public void Lower(string host, int limit) =>
+        _limits.AddOrUpdate(host, Math.Max(1, limit), (_, old) => Math.Max(1, Math.Min(old, limit)));
 }
 
 public static class Http
@@ -27,6 +58,27 @@ public static class Http
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     })
     { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>
+    /// Longest wait for response headers. Without it a server that accepts the connection but never answers
+    /// (rate-limit tarpits do this) would hold a connection forever. Settable for tests.
+    /// </summary>
+    public static TimeSpan HeaderTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+    public static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpRequestMessage req, HttpCompletionOption option,
+        CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(HeaderTimeout);
+        try
+        {
+            return await client.SendAsync(req, option, timeout.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"No response from the server within {HeaderTimeout.TotalSeconds:0} seconds.");
+        }
+    }
 
     public static HttpRequestMessage NewRequest(Uri uri, string? referer, string? cookies, string userAgent)
     {
@@ -48,13 +100,13 @@ public static class Http
         var uri = new Uri(url);
         using var req = NewRequest(uri, referer, cookies, userAgent);
         req.Headers.Range = new RangeHeaderValue(0, 0);
-        using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var resp = await SendAsync(client, req, HttpCompletionOption.ResponseHeadersRead, ct);
 
         if (resp.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             // Some servers reject a range on empty files; fall back to a plain request.
             using var plain = NewRequest(uri, referer, cookies, userAgent);
-            using var plainResp = await client.SendAsync(plain, HttpCompletionOption.ResponseHeadersRead, ct);
+            using var plainResp = await SendAsync(client, plain, HttpCompletionOption.ResponseHeadersRead, ct);
             return Describe(plainResp, uri);
         }
         return Describe(resp, uri);
@@ -62,7 +114,7 @@ public static class Http
 
     static ProbeResult Describe(HttpResponseMessage resp, Uri requested)
     {
-        if (!resp.IsSuccessStatusCode) throw new HttpStatusException(resp.StatusCode);
+        if (!resp.IsSuccessStatusCode) throw HttpStatusException.From(resp);
         var final = resp.RequestMessage?.RequestUri ?? requested;
         long size = -1;
         bool resumable = false;

@@ -24,7 +24,7 @@ sealed class MainForm : Form
     readonly Dictionary<Guid, ListViewItem> _rows = new();
     readonly Dictionary<Guid, ProgressForm> _progress = new();
     readonly ConcurrentDictionary<Guid, byte> _dirty = new();
-    readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 500 };
+    readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
     readonly bool _startHidden;
     readonly QueueScheduler _scheduler;
     ToolStripMenuItem _limiterOn = null!, _limiterOff = null!, _hideCategories = null!;

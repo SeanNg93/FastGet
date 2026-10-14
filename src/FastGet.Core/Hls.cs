@@ -165,8 +165,8 @@ public static partial class Hls
         string userAgent, CancellationToken ct)
     {
         using var req = Http.NewRequest(uri, referer, cookies, userAgent);
-        using var resp = await http.SendAsync(req, ct);
-        if (!resp.IsSuccessStatusCode) throw new HttpStatusException(resp.StatusCode);
+        using var resp = await Http.SendAsync(http, req, HttpCompletionOption.ResponseContentRead, ct);
+        if (!resp.IsSuccessStatusCode) throw HttpStatusException.From(resp);
         return (await resp.Content.ReadAsStringAsync(ct), resp.RequestMessage?.RequestUri ?? uri);
     }
 
@@ -175,8 +175,8 @@ public static partial class Hls
     {
         using var req = Http.NewRequest(uri, referer, cookies, userAgent);
         if (length is { } len) req.Headers.Range = new RangeHeaderValue(offset ?? 0, (offset ?? 0) + len - 1);
-        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (!resp.IsSuccessStatusCode) throw new HttpStatusException(resp.StatusCode);
+        using var resp = await Http.SendAsync(http, req, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!resp.IsSuccessStatusCode) throw HttpStatusException.From(resp);
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
         using var ms = new MemoryStream();
         var buffer = new byte[64 * 1024];
