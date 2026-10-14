@@ -3,3 +3,6 @@ obj/
 .vs/
 *.user
 publish/
+
+# Installer copied to the repo root for local install
+/FastGet-*-setup.exe
