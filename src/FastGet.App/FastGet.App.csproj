@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>FastGet</AssemblyName>
+    <RootNamespace>FastGet.App</RootNamespace>
+    <Product>FastGet Download Manager</Product>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FastGet.Core\FastGet.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Ship the browser extension next to the exe so Options can point the user at it. -->
+    <None Include="..\..\extension\**\*" LinkBase="extension" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
