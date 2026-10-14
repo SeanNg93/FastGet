@@ -9,7 +9,7 @@
     <AssemblyName>FastGet</AssemblyName>
     <RootNamespace>FastGet.App</RootNamespace>
     <Product>FastGet Download Manager</Product>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <ApplicationIcon>..\..\assets\FastGet.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
